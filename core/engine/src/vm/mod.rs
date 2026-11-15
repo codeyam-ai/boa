@@ -986,6 +986,7 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
+        let mut loop_count = 0u32;
         while let Some(byte) = self
             .vm
             .frame()
@@ -994,6 +995,16 @@ impl Context {
             .bytes
             .get(self.vm.frame().pc as usize)
         {
+            loop_count = loop_count.wrapping_add(1);
+            if loop_count.is_multiple_of(1024)
+                && let Some(hook) = &self.interrupt_hook
+                && hook()
+            {
+                return CompletionRecord::Throw(
+                    crate::error::EngineError::RuntimeLimit(RuntimeLimitError::TimeBudget).into(),
+                );
+            }
+
             let opcode = Opcode::decode(*byte);
 
             match self.execute_one(

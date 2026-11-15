@@ -305,6 +305,9 @@ pub enum TryNativeError {
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Error, Trace, Finalize)]
 #[boa_gc(empty_trace)]
 pub enum RuntimeLimitError {
+    /// Error for exceeding the time budget.
+    #[error("script took too long")]
+    TimeBudget,
     /// Error for reaching the iteration loops limit.
     #[error("reached the maximum number of iteration loops on this execution")]
     LoopIteration,

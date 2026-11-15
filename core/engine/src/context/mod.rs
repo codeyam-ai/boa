@@ -93,6 +93,9 @@ thread_local! {
 /// assert_eq!(value.as_number(), Some(12.0))
 /// ```
 pub struct Context {
+    /// A hook that is called periodically during script execution. If it returns true, execution halts.
+    pub interrupt_hook: Option<Rc<dyn Fn() -> bool>>,
+
     /// String interner in the context.
     interner: Interner,
 
@@ -177,6 +180,12 @@ impl Default for Context {
 
 // ==== Public API ====
 impl Context {
+    /// Sets an optional interrupt hook that is called periodically in the VM loop.
+    /// If the hook returns true, the script is interrupted.
+    pub fn set_interrupt_hook(&mut self, hook: Option<Rc<dyn Fn() -> bool>>) {
+        self.interrupt_hook = hook;
+    }
+
     /// Create a new [`ContextBuilder`] to specify the [`Interner`] and/or
     /// the icu data provider.
     #[must_use]
@@ -1225,6 +1234,7 @@ impl ContextBuilder {
             .unwrap_or_else(|| Rc::new(SimpleJobExecutor::new()));
 
         let mut context = Context {
+            interrupt_hook: None,
             interner: self.interner.unwrap_or_default(),
             vm,
             strict: false,
