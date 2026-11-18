@@ -525,6 +525,84 @@ impl Scope {
     pub fn unique_id(&self) -> u32 {
         self.inner.unique_id
     }
+
+    /// Returns a snapshot of the bindings of this scope, in binding-index order.
+    ///
+    /// Used to compile code against a private copy of a global scope, and to
+    /// check later that another global scope has the same binding layout.
+    #[must_use]
+    pub fn layout(&self) -> ScopeLayout {
+        ScopeLayout {
+            bindings: self.inner.bindings.borrow().clone(),
+        }
+    }
+
+    /// Creates a new global scope holding a copy of the given bindings.
+    #[must_use]
+    pub fn new_global_from_layout(layout: &ScopeLayout) -> Self {
+        let scope = Self::new_global();
+        scope
+            .inner
+            .bindings
+            .borrow_mut()
+            .clone_from(&layout.bindings);
+        scope
+    }
+
+    /// Returns `true` if this scope holds exactly the bindings of `layout`:
+    /// same names, indices and kinds, in the same order. Usage-tracking
+    /// flags are ignored.
+    #[must_use]
+    pub fn has_layout(&self, layout: &ScopeLayout) -> bool {
+        let bindings = self.inner.bindings.borrow();
+        bindings.len() == layout.bindings.len()
+            && bindings
+                .iter()
+                .zip(&layout.bindings)
+                .all(|(a, b)| a.same_slot(b))
+    }
+
+    /// Appends the bindings of `layout` from position `from` onwards.
+    ///
+    /// The caller must have checked with [`Scope::has_layout`] that this
+    /// scope holds exactly the first `from` bindings of `layout`.
+    pub fn extend_from_layout(&self, layout: &ScopeLayout, from: usize) {
+        self.inner
+            .bindings
+            .borrow_mut()
+            .extend(layout.bindings.iter().skip(from).cloned());
+    }
+}
+
+/// A snapshot of the bindings of a [`Scope`], see [`Scope::layout`].
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ScopeLayout {
+    bindings: Vec<Binding>,
+}
+
+impl ScopeLayout {
+    /// Returns the number of bindings in this layout.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.bindings.len()
+    }
+
+    /// Returns `true` if this layout has no bindings.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+}
+
+impl Binding {
+    /// Two bindings occupy the same slot when they have the same name, index
+    /// and kind. Usage-tracking flags (`ACCESSED`, `ESCAPES`) are ignored.
+    fn same_slot(&self, other: &Self) -> bool {
+        let kind = BindingFlags::MUTABLE | BindingFlags::LEX | BindingFlags::STRICT;
+        self.name == other.name
+            && self.index == other.index
+            && (self.flags & kind) == (other.flags & kind)
+    }
 }
 
 /// Additional state that all Scopes of a single AST share for bookkeeping.

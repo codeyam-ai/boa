@@ -15,8 +15,16 @@ use rustc_hash::FxHashMap;
 use boa_gc::{Finalize, Gc, GcRefCell, Trace};
 use boa_parser::{Parser, Source, source::ReadChar};
 
+use boa_ast::{
+    expression::{Call, Expression},
+    scope::{Scope, ScopeLayout},
+    visitor::{VisitWith, Visitor},
+};
+use boa_interner::Sym;
+use std::ops::ControlFlow;
+
 use crate::{
-    Context, HostDefined, JsResult, JsString, JsValue, Module, SpannedSourceText,
+    Context, HostDefined, JsNativeError, JsResult, JsString, JsValue, Module, SpannedSourceText,
     bytecompiler::{ByteCompiler, global_declaration_instantiation_context},
     environments::EnvironmentStack,
     js_string,
@@ -126,45 +134,104 @@ impl Script {
                 ScriptPhase::Ast(source) => source,
             };
 
-            let mut annex_b_function_names = Vec::new();
-
-            global_declaration_instantiation_context(
-                &mut annex_b_function_names,
+            compile_script(
                 source,
                 self.inner.realm.scope(),
+                self.get_source(),
+                self.path(),
                 context,
-            )?;
-
-            let spanned_source_text = SpannedSourceText::new_source_only(self.get_source());
-
-            let mut compiler = ByteCompiler::new(
-                js_string!("<main>"),
-                source.strict(),
-                false,
-                self.inner.realm.scope().clone(),
-                self.inner.realm.scope().clone(),
-                false,
-                false,
-                context.interner_mut(),
-                false,
-                spanned_source_text,
-                self.path().map(Path::to_owned).into(),
-            );
-
-            #[cfg(feature = "annex-b")]
-            {
-                compiler.annex_b_function_names = annex_b_function_names;
-            }
-
-            compiler.global_declaration_instantiation(source);
-            compiler.compile_statement_list(source.statements(), true, false);
-
-            Gc::new(compiler.finish())
+            )?
+            .0
         };
 
         *self.inner.phase.borrow_mut() = ScriptPhase::Codeblock(cb.clone());
 
         Ok(cb)
+    }
+
+    /// Parses and compiles `src` for the current realm, and also returns a
+    /// [`CompiledScript`] when the compiled code can be reused in other realms.
+    ///
+    /// The returned [`Script`] behaves exactly like one made by
+    /// [`Script::parse`] followed by [`Script::codeblock`]. Cross-realm reuse
+    /// is refused (the second value is `None`) for scripts that contain a
+    /// direct `eval` call or annex B block-level function hoisting, whose
+    /// compiled form depends on the realm they were compiled in.
+    pub fn parse_reusable<R: ReadChar>(
+        src: Source<'_, R>,
+        context: &mut Context,
+    ) -> JsResult<(Self, Option<CompiledScript>)> {
+        let path = src.path().map(Path::to_path_buf);
+        let mut parser = Parser::new(src);
+        parser.set_identifier(context.next_parser_identifier());
+        if context.is_strict() {
+            parser.set_strict();
+        }
+
+        let realm = context.realm().clone();
+        let before = realm.scope().layout();
+        let mut reusable = true;
+        // A private copy of the global scope: the compiled code then refers
+        // only to bindings that exist in every realm with the same layout,
+        // and later declarations in this realm never leak into its scopes.
+        // Direct eval resolves names through those scopes at run time, so a
+        // script containing one is analyzed against the live scope instead.
+        let (mut code, source, scope) = parser.parse_script_with_source_and_chosen_scope(
+            |ast| {
+                if contains_direct_eval(ast) {
+                    reusable = false;
+                    realm.scope().clone()
+                } else {
+                    Scope::new_global_from_layout(&before)
+                }
+            },
+            context.interner_mut(),
+        )?;
+        if !context.optimizer_options().is_empty() {
+            context.optimize_statement_list(code.statements_mut());
+        }
+
+        let source_text = SourceText::new(source);
+        let (codeblock, annex_b_hoisting) =
+            compile_script(&code, &scope, source_text.clone(), path.as_deref(), context)?;
+        reusable &= !annex_b_hoisting;
+
+        if !reusable && scope == *realm.scope() {
+            let script = Self::from_codeblock(realm, codeblock, source_text, path);
+            return Ok((script, None));
+        }
+
+        let compiled = CompiledScript {
+            inner: Gc::new(CompiledInner {
+                codeblock,
+                source_text,
+                path,
+                after: scope.layout(),
+                before,
+            }),
+        };
+        let script = compiled.instantiate(Some(realm), context).ok_or_else(|| {
+            JsNativeError::error().with_message("global scope changed while compiling a script")
+        })?;
+        Ok((script, reusable.then_some(compiled)))
+    }
+
+    fn from_codeblock(
+        realm: Realm,
+        codeblock: Gc<CodeBlock>,
+        source_text: SourceText,
+        path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            inner: Gc::new(Inner {
+                realm,
+                phase: GcRefCell::new(ScriptPhase::Codeblock(codeblock)),
+                source_text,
+                loaded_modules: GcRefCell::default(),
+                host_defined: HostDefined::default(),
+                path,
+            }),
+        }
     }
 
     /// Evaluates this script and returns its result.
@@ -250,4 +317,128 @@ impl Script {
     pub(super) fn get_source(&self) -> SourceText {
         self.inner.source_text.clone()
     }
+}
+
+/// A script compiled once that can run in any realm on this thread.
+///
+/// Made by [`Script::parse_reusable`]. The compiled code refers to global
+/// `let`/`const`/`class` bindings by slot, so it can be instantiated only in
+/// a realm whose global lexical bindings are exactly those that existed when
+/// it was compiled (for example a fresh realm that ran the same scripts
+/// first). [`CompiledScript::instantiate`] checks this and returns `None`
+/// otherwise; the caller then parses the source again.
+#[derive(Clone, Trace, Finalize)]
+pub struct CompiledScript {
+    inner: Gc<CompiledInner>,
+}
+
+impl std::fmt::Debug for CompiledScript {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledScript")
+            .field("global_bindings_before", &self.inner.before.len())
+            .field("global_bindings_after", &self.inner.after.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Trace, Finalize)]
+struct CompiledInner {
+    codeblock: Gc<CodeBlock>,
+    source_text: SourceText,
+    path: Option<PathBuf>,
+    /// The global scope bindings the script was compiled against.
+    #[unsafe_ignore_trace]
+    before: ScopeLayout,
+    /// The global scope bindings after adding the script's own declarations.
+    #[unsafe_ignore_trace]
+    after: ScopeLayout,
+}
+
+impl CompiledScript {
+    /// Creates a [`Script`] for `realm` (or the current realm) that runs this
+    /// compiled code, without parsing or compiling again.
+    ///
+    /// Returns `None` if the realm's global lexical bindings differ from the
+    /// ones this script was compiled against. On success the script's own
+    /// global declarations are added to the realm's global scope, as parsing
+    /// would; global declaration instantiation still runs at evaluation.
+    #[must_use]
+    pub fn instantiate(&self, realm: Option<Realm>, context: &Context) -> Option<Script> {
+        let realm = realm.unwrap_or_else(|| context.realm().clone());
+        let scope = realm.scope();
+        if !scope.has_layout(&self.inner.before) {
+            return None;
+        }
+        scope.extend_from_layout(&self.inner.after, self.inner.before.len());
+        Some(Script::from_codeblock(
+            realm,
+            self.inner.codeblock.clone(),
+            self.inner.source_text.clone(),
+            self.inner.path.clone(),
+        ))
+    }
+}
+
+/// Compiles a parsed script against the global scope `scope`.
+///
+/// Also returns whether annex B hoisted a block-level function to a global
+/// `var`, which depends on the current realm's global object.
+fn compile_script(
+    source: &boa_ast::Script,
+    scope: &Scope,
+    source_text: SourceText,
+    path: Option<&Path>,
+    context: &mut Context,
+) -> JsResult<(Gc<CodeBlock>, bool)> {
+    let mut annex_b_function_names = Vec::new();
+
+    global_declaration_instantiation_context(&mut annex_b_function_names, source, scope, context)?;
+    let annex_b_hoisting = !annex_b_function_names.is_empty();
+
+    let spanned_source_text = SpannedSourceText::new_source_only(source_text);
+
+    let mut compiler = ByteCompiler::new(
+        js_string!("<main>"),
+        source.strict(),
+        false,
+        scope.clone(),
+        scope.clone(),
+        false,
+        false,
+        context.interner_mut(),
+        false,
+        spanned_source_text,
+        path.map(Path::to_owned).into(),
+    );
+
+    #[cfg(feature = "annex-b")]
+    {
+        compiler.annex_b_function_names = annex_b_function_names;
+    }
+
+    compiler.global_declaration_instantiation(source);
+    compiler.compile_statement_list(source.statements(), true, false);
+
+    Ok((Gc::new(compiler.finish()), annex_b_hoisting))
+}
+
+/// Returns `true` if `script` calls `eval` directly anywhere, including
+/// inside nested functions and classes.
+fn contains_direct_eval(script: &boa_ast::Script) -> bool {
+    struct DirectEvalFinder;
+
+    impl<'ast> Visitor<'ast> for DirectEvalFinder {
+        type BreakTy = ();
+
+        fn visit_call(&mut self, node: &'ast Call) -> ControlFlow<Self::BreakTy> {
+            if let Expression::Identifier(ident) = node.function().flatten()
+                && ident.sym() == Sym::EVAL
+            {
+                return ControlFlow::Break(());
+            }
+            node.visit_with(self)
+        }
+    }
+
+    script.visit_with(&mut DirectEvalFinder).is_break()
 }

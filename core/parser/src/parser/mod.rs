@@ -171,6 +171,30 @@ impl<'a, R: ReadChar> Parser<'a, R> {
         Ok((ast, source))
     }
 
+    /// Like [`Parser::parse_script_with_source`], but `choose_scope` picks the
+    /// global scope to run scope analysis against after seeing the parsed,
+    /// not yet analyzed, script. Returns the chosen scope with the script.
+    ///
+    /// # Errors
+    ///
+    /// Will return `Err` on any parsing error, including invalid reads of the bytes being parsed.
+    pub fn parse_script_with_source_and_chosen_scope<F>(
+        &mut self,
+        choose_scope: F,
+        interner: &mut Interner,
+    ) -> ParseResult<(boa_ast::Script, boa_ast::SourceText, Scope)>
+    where
+        F: FnOnce(&boa_ast::Script) -> Scope,
+    {
+        self.cursor.set_goal(InputElement::HashbangOrRegExp);
+        let (mut ast, source) = ScriptParser::new(false).parse(&mut self.cursor, interner)?;
+        let scope = choose_scope(&ast);
+        if let Err(reason) = ast.analyze_scope(&scope, interner) {
+            return Err(Error::scope_analysis(reason));
+        }
+        Ok((ast, source, scope))
+    }
+
     /// Parse the full input as an [ECMAScript Module][spec] into the boa AST representation without source text.
     /// The resulting `ModuleItemList` can be compiled into boa bytecode and executed in the boa vm.
     ///

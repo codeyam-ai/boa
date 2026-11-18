@@ -130,9 +130,6 @@ pub struct Context {
     optimizer_options: OptimizerOptions,
     root_shape: RootShape,
 
-    /// Unique identifier for each parser instance used during the context lifetime.
-    parser_identifier: u32,
-
     data: HostDefined<dyn Any>,
 }
 
@@ -663,9 +660,17 @@ impl Context {
     }
 
     /// Increment and get the parser identifier.
+    ///
+    /// The identifier keys tagged-template sites in each realm's template
+    /// map. It is process-wide rather than per context so a [`CompiledScript`]
+    /// compiled in one context never shares a site with a script parsed in
+    /// another.
+    ///
+    /// [`CompiledScript`]: crate::script::CompiledScript
+    #[allow(clippy::unused_self)]
     pub(crate) fn next_parser_identifier(&mut self) -> u32 {
-        self.parser_identifier += 1;
-        self.parser_identifier
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// `CanDeclareGlobalFunction ( N )`
@@ -1268,7 +1273,6 @@ impl ContextBuilder {
             module_loader,
             optimizer_options: OptimizerOptions::OPTIMIZE_ALL,
             root_shape,
-            parser_identifier: 0,
             can_block: self.can_block,
             data: HostDefined::default(),
         };
