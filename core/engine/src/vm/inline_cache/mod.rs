@@ -7,8 +7,18 @@ use boa_macros::{Finalize, Trace};
 
 use crate::{
     JsString,
-    object::shape::{Shape, WeakShape, slot::Slot},
+    object::shape::{
+        Shape, WeakShape,
+        slot::{Slot, SlotAttributes},
+    },
 };
+
+/// The current shape of `shape`'s prototype, if it has one.
+fn prototype_shape_of(shape: &Shape) -> Option<Shape> {
+    shape
+        .prototype()
+        .map(|prototype| prototype.borrow().shape().clone())
+}
 
 #[cfg(test)]
 mod tests;
@@ -22,6 +32,29 @@ pub(crate) struct CacheEntry {
     pub(crate) shape: WeakShape,
     #[unsafe_ignore_trace]
     pub(crate) slot: Slot,
+    /// For a slot found on the prototype ([`SlotAttributes::PROTOTYPE`]), the shape the
+    /// prototype had when the entry was recorded.
+    ///
+    /// The entry is keyed on the receiver's shape, which does not change when the prototype's
+    /// own properties are deleted or reconfigured. Those operations give the prototype a new
+    /// unique shape (and may shift its storage), so a hit is only valid while the prototype
+    /// still has this shape.
+    pub(crate) prototype_shape: Option<WeakShape>,
+}
+
+impl CacheEntry {
+    /// Whether this is a prototype entry whose prototype no longer has the shape it had when
+    /// the entry was recorded.
+    fn is_prototype_stale(&self, shape: &Shape) -> bool {
+        let Some(cached) = &self.prototype_shape else {
+            return false;
+        };
+        let Some(cached) = cached.upgrade() else {
+            return true;
+        };
+        prototype_shape_of(shape)
+            .is_none_or(|current| current.to_addr_usize() != cached.to_addr_usize())
+    }
 }
 
 /// An inline cache entry for a property access.
@@ -67,6 +100,16 @@ impl InlineCache {
             return;
         }
 
+        let prototype_shape = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+            let Some(prototype_shape) = prototype_shape_of(shape) else {
+                // A prototype slot without a prototype cannot be served from the cache.
+                return;
+            };
+            Some(WeakShape::from(&prototype_shape))
+        } else {
+            None
+        };
+
         let mut entries = self.entries.borrow_mut();
 
         // Add a new entry if there's space.
@@ -74,6 +117,7 @@ impl InlineCache {
             .try_push(CacheEntry {
                 shape: shape.into(),
                 slot,
+                prototype_shape,
             })
             .is_err()
         {
@@ -99,6 +143,12 @@ impl InlineCache {
         while i < entries.len() {
             if let Some(upgraded) = entries[i].shape.upgrade() {
                 if upgraded.to_addr_usize() == shape_addr {
+                    if entries[i].is_prototype_stale(&upgraded) {
+                        // The prototype was reshaped since this entry was recorded: its
+                        // cached slot may now be out of bounds or point at another property.
+                        entries.swap_remove(i);
+                        break;
+                    }
                     result = Some((upgraded, entries[i].slot));
                     break;
                 }

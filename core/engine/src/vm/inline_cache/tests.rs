@@ -465,3 +465,62 @@ fn test_megamorphic_inline_cache() -> JsResult<()> {
 
     Ok(())
 }
+
+/// Deleting properties from a prototype gives it a new shape and shifts its storage, while the
+/// receiver keeps its shape. A cached prototype slot must not be served after that: it would
+/// index past the end of the prototype's storage (a panic) or read another property.
+#[test]
+fn prototype_slot_is_revalidated_after_prototype_delete() -> JsResult<()> {
+    let context = &mut Context::default();
+    let result = context.eval(Source::from_bytes(
+        r#"
+        function read(o) { return o.last; }
+        const o = {};
+        const names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"];
+        for (const n of names) {
+            Object.defineProperty(Object.prototype, n, { value: 1, configurable: true, writable: true });
+        }
+        Object.prototype.last = 7;
+        const before = [read(o), read(o), read(o)];
+        for (const n of names) delete Object.prototype[n];
+        const after = read(o);
+        delete Object.prototype.last;
+        before.join(",") + "|" + after + "|" + read(o);
+        "#,
+    ))?;
+
+    assert_eq!(
+        result.to_string(context)?.to_std_string_escaped(),
+        "7,7,7|7|undefined"
+    );
+    Ok(())
+}
+
+/// The same revalidation applies to stores that hit a cached prototype setter.
+#[test]
+fn prototype_setter_slot_is_revalidated_after_prototype_delete() -> JsResult<()> {
+    let context = &mut Context::default();
+    let result = context.eval(Source::from_bytes(
+        r#"
+        let seen = [];
+        function write(o, v) { o.last = v; }
+        const proto = {};
+        const names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m"];
+        for (const n of names) {
+            Object.defineProperty(proto, n, { value: 1, configurable: true, writable: true });
+        }
+        Object.defineProperty(proto, "last", { set(v) { seen.push(v); }, configurable: true });
+        const o = Object.create(proto);
+        write(o, 1); write(o, 2); write(o, 3);
+        for (const n of names) delete proto[n];
+        write(o, 4);
+        seen.join(",");
+        "#,
+    ))?;
+
+    assert_eq!(
+        result.to_string(context)?.to_std_string_escaped(),
+        "1,2,3,4"
+    );
+    Ok(())
+}
