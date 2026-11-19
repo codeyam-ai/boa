@@ -54,11 +54,15 @@ use icu_decimal::provider::DecimalSymbolsV1;
 use icu_locale::{Locale, extensions::unicode::Value};
 use icu_time::{
     TimeZoneInfo, ZonedDateTime,
-    zone::{IanaParser, models::Base},
+    zone::{
+        IanaParser,
+        models::{AtTime, Base},
+    },
 };
 use timezone_provider::provider::TimeZoneId;
 
 mod options;
+mod parts;
 
 #[cfg(all(test, feature = "intl_bundled"))]
 mod tests;
@@ -70,9 +74,14 @@ pub(crate) enum FormatTimeZone {
 }
 
 impl FormatTimeZone {
-    pub(crate) fn to_time_zone_info(&self) -> TimeZoneInfo<Base> {
+    /// The zone at an instant whose offset is `offset_seconds`. A named zone
+    /// carries the offset too, so `timeZoneName` can say `EST` or `GMT-5`
+    /// rather than `GMT+?`.
+    pub(crate) fn to_time_zone_info(&self, offset_seconds: i32) -> TimeZoneInfo<Base> {
         match self {
-            Self::Identifier((tz, _)) => tz.without_offset(),
+            Self::Identifier((tz, _)) => {
+                tz.with_offset(UtcOffset::try_from_seconds(offset_seconds).ok())
+            }
             Self::UtcOffset(utc_offset) => TimeZone::UNKNOWN.with_offset(Some(*utc_offset)),
         }
     }
@@ -91,6 +100,9 @@ pub(crate) struct DateTimeFormat {
     time_style: Option<TimeStyle>,
     fractional_second_digits: Option<SubsecondDigits>,
     time_zone: FormatTimeZone,
+    /// The `timeZone` `resolvedOptions()` reports: the case-normalized IANA
+    /// name (`"America/New_York"`) or the offset string (`"+05:30"`).
+    time_zone_name: JsString,
     fieldset: CompositeFieldSet,
     formatter: DateTimeFormatter<CompositeFieldSet>,
     bound_format: Option<JsFunction>,
@@ -123,6 +135,13 @@ impl IntrinsicObject for DateTimeFormat {
                 Attribute::CONFIGURABLE,
             )
             .method(Self::resolved_options, js_string!("resolvedOptions"), 0)
+            .method(Self::format_to_parts, js_string!("formatToParts"), 1)
+            .method(Self::format_range, js_string!("formatRange"), 2)
+            .method(
+                Self::format_range_to_parts,
+                js_string!("formatRangeToParts"),
+                2,
+            )
             .property(
                 JsSymbol::to_string_tag(),
                 js_string!("Intl.DateTimeFormat"),
@@ -142,7 +161,7 @@ impl BuiltInObject for DateTimeFormat {
 
 impl BuiltInConstructor for DateTimeFormat {
     const CONSTRUCTOR_ARGUMENTS: usize = 0;
-    const PROTOTYPE_STORAGE_SLOTS: usize = 4;
+    const PROTOTYPE_STORAGE_SLOTS: usize = 7;
     const CONSTRUCTOR_STORAGE_SLOTS: usize = 1;
 
     const STANDARD_CONSTRUCTOR: fn(&StandardConstructors) -> &StandardConstructor =
@@ -386,18 +405,9 @@ impl DateTimeFormat {
                 );
             }
 
-            let time_zone_str = match &dtf.time_zone {
-                FormatTimeZone::UtcOffset(offset) => {
-                    let seconds = offset.to_seconds();
-                    let hours = seconds / 3600;
-                    let minutes = (seconds.abs() % 3600) / 60;
-                    format!("{hours:+03}:{minutes:02}")
-                }
-                FormatTimeZone::Identifier((tz, _id)) => tz.to_string(),
-            };
             options.property(
                 js_string!("timeZone"),
-                js_string!(time_zone_str),
+                dtf.time_zone_name.clone(),
                 Attribute::all(),
             );
 
@@ -676,9 +686,8 @@ pub(crate) fn create_date_time_format(
 
     // 16. If timeZone is undefined, then
     let time_zone = if time_zone.is_undefined() {
-        // TODO (nekevss): Resolve system time zone
         // a. Set timeZone to SystemTimeZoneIdentifier().
-        JsString::from("Etc/UTC")
+        system_time_zone_identifier(context)
     // 17. Else,
     } else {
         // a. Set timeZone to ? ToString(timeZone).
@@ -687,7 +696,9 @@ pub(crate) fn create_date_time_format(
     // 18. If IsTimeZoneOffsetString(timeZone) is true, then
     let time_zone_string = time_zone.to_std_string_escaped();
     // Note: Should a timezone enum be part of temporal_rs, icu_time, or an ECMA402 wrapper lib
-    let time_zone = if let Ok(utc_offset) = UtcOffset::try_from_str(&time_zone_string) {
+    let (time_zone, time_zone_name) = if let Ok(utc_offset) =
+        UtcOffset::try_from_str(&time_zone_string)
+    {
         //  a. Let parseResult be ParseText(StringToCodePoints(timeZone), UTCOffset).
         //  b. Assert: parseResult is a Parse Node.
         //  c. If parseResult contains more than one MinuteSecond Parse Node, throw a RangeError exception.
@@ -695,7 +706,14 @@ pub(crate) fn create_date_time_format(
         //  e. Let offsetMinutes be offsetNanoseconds / (6 × 10**10).
         //  f. Assert: offsetMinutes is an integer.
         //  g. Set timeZone to FormatOffsetTimeZoneIdentifier(offsetMinutes).
-        FormatTimeZone::UtcOffset(utc_offset)
+        let seconds = utc_offset.to_seconds();
+        let sign = if seconds < 0 { '-' } else { '+' };
+        let hours = seconds.abs() / 3600;
+        let minutes = (seconds.abs() % 3600) / 60;
+        (
+            FormatTimeZone::UtcOffset(utc_offset),
+            JsString::from(format!("{sign}{hours:02}:{minutes:02}")),
+        )
     } else {
         // 19. Else,
         //  a. Let timeZoneIdentifierRecord be GetAvailableNamedTimeZoneIdentifier(timeZone).
@@ -714,7 +732,14 @@ pub(crate) fn create_date_time_format(
                 JsNativeError::range()
                     .with_message(format!("{time_zone_string:#?} was not a valid time zone."))
             })?;
-        FormatTimeZone::Identifier((time_zone, time_zone_id))
+        let name = context
+            .timezone_provider()
+            .identifier(time_zone_id)
+            .map_or_else(|_| time_zone_string.clone(), std::borrow::Cow::into_owned);
+        (
+            FormatTimeZone::Identifier((time_zone, time_zone_id)),
+            JsString::from(name),
+        )
     };
     // 20. (deferred) Set dateTimeFormat.[[TimeZone]] to timeZone.
 
@@ -832,6 +857,7 @@ pub(crate) fn create_date_time_format(
         time_style,
         fractional_second_digits: format_options.fractional_second_digits(),
         time_zone,
+        time_zone_name,
         fieldset,
         formatter,
         bound_format: None,
@@ -863,6 +889,19 @@ pub(crate) fn format_timestamp_with_dtf(
     timestamp: f64,
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    let zdt = zoned_date_time(dtf, timestamp, context)?;
+    Ok(JsString::from(dtf.formatter.format(&zdt).to_string()).into())
+}
+
+/// The calendar fields and zone `timestamp` has in `dtf`'s time zone: steps
+/// 1–6 of [`PartitionDateTimePattern`][11.5.6].
+///
+/// [11.5.6]: https://tc39.es/ecma402/#sec-partitiondatetimepattern
+fn zoned_date_time(
+    dtf: &DateTimeFormat,
+    timestamp: f64,
+    context: &mut Context,
+) -> JsResult<ZonedDateTime<Iso, TimeZoneInfo<AtTime>>> {
     // PartitionDateTimePattern ( dtf, x ) step 1:
     // 1. Let x be TimeClip(x).
     let x = time_clip(timestamp);
@@ -903,15 +942,31 @@ pub(crate) fn format_timestamp_with_dtf(
     let tz = x + f64::from(time_zone_offset_seconds * 1_000);
     let fields = ToLocalTime::from_local_epoch_milliseconds(tz)?;
     let dt = fields.to_formattable_datetime()?;
-    let tz_info = time_zone.to_time_zone_info();
+    let tz_info = time_zone.to_time_zone_info(time_zone_offset_seconds);
     let tz_info_at_time = tz_info.at_date_time(dt);
-    let zdt = ZonedDateTime {
+    Ok(ZonedDateTime {
         date: dt.date,
         time: dt.time,
         zone: tz_info_at_time,
+    })
+}
+
+/// Abstract operation [`SystemTimeZoneIdentifier ( )`][spec], taken from the
+/// host hooks. A host zone this engine cannot resolve falls back to `"UTC"`
+/// rather than making every `Intl.DateTimeFormat` construction throw.
+///
+/// [spec]: https://tc39.es/ecma262/#sec-systemtimezoneidentifier
+pub(crate) fn system_time_zone_identifier(context: &Context) -> JsString {
+    let Some(id) = context.host_hooks().system_time_zone_identifier() else {
+        return js_string!("UTC");
     };
-    let result = dtf.formatter.format(&zdt).to_string();
-    Ok(JsString::from(result).into())
+    if UtcOffset::try_from_str(&id).is_ok()
+        || context.timezone_provider().get(id.as_bytes()).is_ok()
+    {
+        JsString::from(id)
+    } else {
+        js_string!("UTC")
+    }
 }
 
 fn date_time_style_format(
@@ -951,6 +1006,20 @@ fn best_fit_date_time_format(format_options: &FormatOptions) -> JsResult<Composi
     builder.date_fields = format_options.to_date_fields();
     builder.time_precision = format_options.to_time_fields();
     builder.zone_style = format_options.to_zone_style();
+    if builder.date_fields.is_some_and(|fields| {
+        !matches!(
+            fields,
+            DateFields::M
+                | DateFields::MD
+                | DateFields::MDE
+                | DateFields::D
+                | DateFields::DE
+                | DateFields::E
+        )
+    }) {
+        builder.year_style = format_options.to_year_style();
+    }
+    builder.alignment = format_options.to_alignment();
     builder
         .build_composite()
         .map_err(|e| JsNativeError::range().with_message(e.to_string()).into())

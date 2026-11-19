@@ -10,6 +10,7 @@ license.workspace = true
 description.workspace = true
 
 [dependencies]
+icu_provider = { workspace = true }
 icu_provider_export = { workspace = true, features = [
     "blob_exporter",
     "rayon",
@@ -17,7 +18,8 @@ icu_provider_export = { workspace = true, features = [
 icu_provider_source = { workspace = true, features = [
     "networking",
     "use_wasm",
-    "unstable"
+    "unstable",
+    "icu_experimental",
 ] }
 log.workspace = true
 simple_logger.workspace = true
@@ -36,6 +38,7 @@ icu_plurals = { workspace = true, features = ["datagen", "unstable"] }
 icu_segmenter = { workspace = true, features = ["datagen"] }
 icu_locale_fallback = { workspace = true, features = ["datagen"] }
 icu_calendar = { workspace = true, features = ["datagen"] }
+icu_experimental = { workspace = true, features = ["datagen"] }
 
 [lints]
 workspace = true

@@ -19,7 +19,7 @@ use icu_calendar::cal::{
 use icu_datetime::{
     DateTimeFormatterPreferences,
     fieldsets::builder::{DateFields, ZoneStyle},
-    options::{Length, SubsecondDigits as IcuSubsecondDigits, TimePrecision},
+    options::{Alignment, Length, SubsecondDigits as IcuSubsecondDigits, TimePrecision, YearStyle},
     preferences::{CalendarAlgorithm, HijriCalendarAlgorithm, HourCycle as IcuHourCycle},
     scaffold::CldrCalendar,
 };
@@ -316,6 +316,30 @@ impl FormatOptions {
             (Some(_h), None, None, None) => Some(TimePrecision::Hour),
             (None, None, None, None) => None,
         }
+    }
+
+    /// The [`YearStyle`] for the `year` and `era` options: `numeric` always
+    /// shows the full year (`2020`, not ICU4X's short-length `20`), `2-digit`
+    /// lets the locale abbreviate it, and an `era` option always shows the era.
+    pub(super) fn to_year_style(&self) -> Option<YearStyle> {
+        match (self.era, self.year) {
+            (Some(_), _) => Some(YearStyle::WithEra),
+            (None, Some(Year::Numeric)) => Some(YearStyle::Full),
+            (None, Some(Year::TwoDigit)) => Some(YearStyle::Auto),
+            (None, None) => None,
+        }
+    }
+
+    /// `2-digit` day, month or hour pads the numeric fields (`01/05`), which
+    /// ICU4X calls the column alignment.
+    pub(super) fn to_alignment(&self) -> Option<Alignment> {
+        // Minutes and seconds are always two digits, so only a 2-digit day,
+        // month or hour changes the output; padding every field because of
+        // `minute: "2-digit"` would print `06:05 PM` for `6:05 PM`.
+        let two_digit = matches!(self.day, Some(Day::TwoDigit))
+            || matches!(self.month, Some(Month::TwoDigit))
+            || matches!(self.hour, Some(Hour::TwoDigit));
+        two_digit.then_some(Alignment::Column)
     }
 
     /// Convert the current `FormatOptions` to a [`ZoneStyle`].

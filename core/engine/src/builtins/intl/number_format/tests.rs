@@ -39,3 +39,75 @@ fn u16_to_rounding_increment_rainy_day() {
         assert!(RoundingIncrement::from_u16(num).is_none());
     }
 }
+
+#[cfg(feature = "intl_bundled")]
+mod styles {
+    use crate::{TestAction, js_string, run_test_actions};
+
+    /// Currency: the symbol and its placement follow the locale, the
+    /// fraction digits follow the currency unless overridden.
+    #[test]
+    fn currency_style() {
+        run_test_actions([
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(1234.5)",
+                js_string!("$1,234.50"),
+            ),
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('en-US', { style: 'currency', currency: 'JPY' }).format(1234.5)",
+                js_string!("¥1,235"),
+            ),
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(1234.5)",
+                js_string!("1.234,50\u{a0}€"),
+            ),
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(9.99)",
+                js_string!("$10"),
+            ),
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', useGrouping: false }).format(1234.5)",
+                js_string!("$1234.50"),
+            ),
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(-5)",
+                js_string!("-$5.00"),
+            ),
+        ]);
+    }
+
+    /// Percent multiplies by 100 and appends the locale's percent sign.
+    #[test]
+    fn percent_style() {
+        run_test_actions([
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('en-US', { style: 'percent' }).format(0.25)",
+                js_string!("25%"),
+            ),
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 1 }).format(0.1234)",
+                js_string!("12.3%"),
+            ),
+        ]);
+    }
+
+    /// Unit names are short by default, spelled out for `long`, and the
+    /// number keeps its own rounding.
+    #[test]
+    fn unit_style() {
+        run_test_actions([
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('en-US', { style: 'unit', unit: 'kilogram', maximumFractionDigits: 1 }).format(2.25)",
+                js_string!("2.3 kg"),
+            ),
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('en-US', { style: 'unit', unit: 'liter', unitDisplay: 'long' }).format(3)",
+                js_string!("3 liters"),
+            ),
+            TestAction::assert_eq(
+                "new Intl.NumberFormat('en-US', { style: 'unit', unit: 'kilometer', unitDisplay: 'long' }).format(1)",
+                js_string!("1 kilometer"),
+            ),
+        ]);
+    }
+}

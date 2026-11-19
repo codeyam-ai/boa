@@ -10,6 +10,41 @@ use icu_provider_source::{CoverageLevel, SourceDataProvider};
 /// Path to the directory where the exported data lives.
 const EXPORT_PATH: &str = "core/icu_provider/data";
 
+/// The `icu_experimental` markers behind `Intl.NumberFormat`'s currency,
+/// percent and unit styles and `Intl.DisplayNames`.
+const EXPERIMENTAL_MARKERS: &[DataMarkerInfo] = {
+    use icu_experimental::dimension::provider::{currency, percent, units};
+    use icu_experimental::displaynames::provider as dn;
+    use icu_provider::DataMarker;
+    use units::categorized_display_names as cdn;
+    &[
+        currency::displayname::CurrencyDisplaynameV1::INFO,
+        currency::essentials::CurrencyEssentialsV1::INFO,
+        currency::symbols::CurrencySymbolsV1::INFO,
+        currency::patterns::CurrencyPatternsDataV1::INFO,
+        currency::extended::CurrencyExtendedDataV1::INFO,
+        currency::fractions::CurrencyFractionsV1::INFO,
+        currency::no_currency::CurrencyPatternsNoCurrencyV1::INFO,
+        percent::PercentEssentialsV1::INFO,
+        units::essentials::UnitsEssentialsV1::INFO,
+        cdn::UnitsNamesAreaCoreV1::INFO,
+        cdn::UnitsNamesAreaExtendedV1::INFO,
+        cdn::UnitsNamesDurationCoreV1::INFO,
+        cdn::UnitsNamesDurationExtendedV1::INFO,
+        cdn::UnitsNamesLengthCoreV1::INFO,
+        cdn::UnitsNamesLengthExtendedV1::INFO,
+        cdn::UnitsNamesMassCoreV1::INFO,
+        cdn::UnitsNamesMassExtendedV1::INFO,
+        cdn::UnitsNamesVolumeCoreV1::INFO,
+        cdn::UnitsNamesVolumeExtendedV1::INFO,
+        dn::LanguageDisplayNamesV1::INFO,
+        dn::LocaleDisplayNamesV1::INFO,
+        dn::VariantDisplayNamesV1::INFO,
+        dn::RegionDisplayNamesV1::INFO,
+        dn::ScriptDisplayNamesV1::INFO,
+    ]
+};
+
 /// List of services used by `Intl` components.
 ///
 /// This must be kept in sync with the list of implemented services for `Intl`.
@@ -25,6 +60,7 @@ const SERVICES: &[(&str, &[DataMarkerInfo])] = &[
     ("icu_plurals", icu_plurals::provider::MARKERS),
     ("icu_segmenter", icu_segmenter::provider::MARKERS),
     ("icu_calendar", icu_calendar::provider::MARKERS),
+    ("icu_experimental", EXPERIMENTAL_MARKERS),
     (
         "icu_locale_fallback",
         icu_locale_fallback::provider::MARKERS,
@@ -56,9 +92,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         .with_level(log::LevelFilter::Info)
         .init()?;
 
-    // Removal will throw an error if the directory doesn't exist, hence
-    // why we can ignore the error.
-    let _unused = std::fs::remove_dir_all(EXPORT_PATH);
+    // `BOA_ICU4X_SERVICES=icu_experimental,icu_decimal` regenerates only
+    // the named services and leaves every other exported blob untouched.
+    let only: Option<Vec<String>> = std::env::var("BOA_ICU4X_SERVICES")
+        .ok()
+        .map(|list| list.split(',').map(|s| s.trim().to_owned()).collect());
+
+    if only.is_none() {
+        // Removal will throw an error if the directory doesn't exist, hence
+        // why we can ignore the error.
+        let _unused = std::fs::remove_dir_all(EXPORT_PATH);
+    }
     std::fs::create_dir_all(EXPORT_PATH)?;
 
     let provider = &SourceDataProvider::new();
@@ -84,6 +128,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     .with_recommended_segmenter_models();
 
     for (service, keys) in SERVICES {
+        if only
+            .as_ref()
+            .is_some_and(|only| !only.iter().any(|s| s == service))
+        {
+            continue;
+        }
         export_for_service(service, keys, provider, driver.clone())?;
     }
 

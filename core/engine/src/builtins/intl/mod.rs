@@ -31,8 +31,9 @@ use icu_provider::{DataMarker, DataMarkerAttributes};
 use static_assertions::const_assert;
 
 pub(crate) use self::{
-    collator::Collator, date_time_format::DateTimeFormat, list_format::ListFormat, locale::Locale,
-    number_format::NumberFormat, plural_rules::PluralRules, segmenter::Segmenter,
+    collator::Collator, date_time_format::DateTimeFormat, display_names::DisplayNames,
+    list_format::ListFormat, locale::Locale, number_format::NumberFormat,
+    plural_rules::PluralRules, segmenter::Segmenter,
 };
 
 /// Macro to easily implement `ServicePreferences`.
@@ -80,6 +81,7 @@ macro_rules! impl_service_preferences {
 
 pub(crate) mod collator;
 pub(crate) mod date_time_format;
+pub(crate) mod display_names;
 pub(crate) mod list_format;
 pub(crate) mod locale;
 pub(crate) mod number_format;
@@ -130,6 +132,15 @@ impl IntrinsicObject for Intl {
                 Collator::NAME,
                 realm.intrinsics().constructors().collator().constructor(),
                 Collator::ATTRIBUTE,
+            )
+            .static_property(
+                DisplayNames::NAME,
+                realm
+                    .intrinsics()
+                    .constructors()
+                    .display_names()
+                    .constructor(),
+                DisplayNames::ATTRIBUTE,
             )
             .static_property(
                 ListFormat::NAME,

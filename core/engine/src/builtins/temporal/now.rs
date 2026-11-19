@@ -225,17 +225,10 @@ impl HostTimeZone for &Context {
         &self,
         provider: &(impl TimeZoneProvider + ?Sized),
     ) -> TemporalResult<TimeZone> {
-        #[cfg(not(feature = "system-time-zone"))]
-        {
-            Ok(TimeZone::utc_with_provider(provider))
-        }
-        #[cfg(feature = "system-time-zone")]
-        {
-            iana_time_zone::get_timezone()
-                .map_err(|_| {
-                    TemporalError::range().with_message("Unable to fetch system time zone")
-                })
-                .and_then(|id| TimeZone::try_from_str_with_provider(&id, provider))
+        match self.host_hooks().system_time_zone_identifier() {
+            Some(id) => TimeZone::try_from_str_with_provider(&id, provider)
+                .or_else(|_| Ok(TimeZone::utc_with_provider(provider))),
+            None => Ok(TimeZone::utc_with_provider(provider)),
         }
     }
 }

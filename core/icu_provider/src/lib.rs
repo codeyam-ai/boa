@@ -125,6 +125,7 @@ static PROVIDER: Lazy<LocaleFallbackProvider<MultiForkByMarkerProvider<LazyBuffe
             provider_from_icu_crate!(icu_segmenter),
             provider_from_icu_crate!(icu_locale_fallback),
             provider_from_icu_crate!(icu_calendar),
+            provider_from_icu_crate!(icu_experimental),
         ]);
         let fallbacker = LocaleFallbacker::try_new_with_buffer_provider(&provider)
             .expect("The statically compiled data file should be valid.");

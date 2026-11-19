@@ -41,7 +41,9 @@ use crate::{
 use crate::{js_error, value::JsVariant};
 
 mod options;
+mod style;
 pub(crate) use options::*;
+use style::StyleFormatter;
 
 #[cfg(test)]
 mod tests;
@@ -117,6 +119,7 @@ pub(crate) struct NumberFormat {
     formatter: Formatter,
     numbering_system: NumberingSystem,
     unit_options: UnitFormatOptions,
+    style: StyleFormatter,
     digit_options: DigitFormatOptions,
     use_grouping: GroupingStrategy,
     sign_display: SignDisplay,
@@ -141,17 +144,28 @@ impl NumberFormat {
     ///
     /// [full]: https://tc39.es/ecma402/#sec-formatnumber
     /// [parts]: https://tc39.es/ecma402/#sec-formatnumbertoparts
-    pub(crate) fn format<'l>(
-        &'l self,
-        value: &'l mut Decimal,
-    ) -> FormattedNumber<'l, impl Writeable> {
-        // TODO: Missing support from ICU4X for Percent/Currency/Unit formatting.
+    pub(crate) fn format(&self, value: &mut Decimal) -> String {
         // TODO: Missing support from ICU4X for Scientific/Engineering notation.
 
+        // FormatNumericToString step 1: a percent is formatted as x × 100.
+        if self.style.scales_by_hundred() {
+            value.multiply_pow10(2);
+        }
         self.digit_options.format_fixed_decimal(value);
         value.apply_sign_display(self.sign_display);
 
-        self.formatter.format(value)
+        let signed = self.formatter.format(value).write_to_string().into_owned();
+        if matches!(self.style, StyleFormatter::Decimal) {
+            return signed;
+        }
+        let mut unsigned_value = value.clone();
+        unsigned_value.apply_sign_display(SignDisplay::Never);
+        let unsigned = self
+            .formatter
+            .format(&unsigned_value)
+            .write_to_string()
+            .into_owned();
+        self.style.apply(&signed, &unsigned, value)
     }
 }
 
@@ -354,29 +368,30 @@ impl NumberFormat {
 
         // 15. Let style be numberFormat.[[Style]].
         // 16. If style is "currency", then
-        let (min_fractional, max_fractional) = if unit_options.style() == Style::Currency {
-            // TODO: Missing support from ICU4X
-            // a. Let currency be numberFormat.[[Currency]].
-            // b. Let cDigits be CurrencyDigits(currency).
-            // c. Let mnfdDefault be cDigits.
-            // d. Let mxfdDefault be cDigits.
-            return Err(JsNativeError::typ().with_message("unimplemented").into());
-        } else {
-            // 17. Else,
-            (
-                // a. Let mnfdDefault be 0.
-                0,
-                // b. If style is "percent", then
-                if unit_options.style() == Style::Percent {
-                    // i. Let mxfdDefault be 0.
-                    0
-                } else {
-                    // c. Else,
-                    //    i. Let mxfdDefault be 3.
-                    3
-                },
-            )
-        };
+        let (min_fractional, max_fractional) =
+            if let UnitFormatOptions::Currency { currency, .. } = &unit_options {
+                // a. Let currency be numberFormat.[[Currency]].
+                // b. Let cDigits be CurrencyDigits(currency).
+                let digits = style::currency_digits(context.intl_provider(), currency.as_str());
+                // c. Let mnfdDefault be cDigits.
+                // d. Let mxfdDefault be cDigits.
+                (digits, digits)
+            } else {
+                // 17. Else,
+                (
+                    // a. Let mnfdDefault be 0.
+                    0,
+                    // b. If style is "percent", then
+                    if unit_options.style() == Style::Percent {
+                        // i. Let mxfdDefault be 0.
+                        0
+                    } else {
+                        // c. Else,
+                        //    i. Let mxfdDefault be 3.
+                        3
+                    },
+                )
+            };
 
         // 18. Let notation be ? GetOption(options, "notation", string, « "standard", "scientific", "engineering", "compact" », "standard").
         // 19. Set numberFormat.[[Notation]] to notation.
@@ -546,11 +561,15 @@ impl NumberFormat {
             (formatter, nu)
         };
 
+        let style = StyleFormatter::try_new(context.intl_provider(), &locale, &unit_options)
+            .map_err(|err| js_error!(RangeError: "{}", err.to_string()))?;
+
         Ok(NumberFormat {
             locale,
             numbering_system,
             formatter,
             unit_options,
+            style,
             digit_options,
             use_grouping,
             sign_display,
@@ -619,7 +638,7 @@ impl NumberFormat {
                         let mut x = to_intl_mathematical_value(value, context)?;
 
                         // 5. Return FormatNumeric(nf, x).
-                        Ok(js_string!(nf.borrow().data().format(&mut x).write_to_string()).into())
+                        Ok(js_string!(nf.borrow().data().format(&mut x)).into())
                     },
                     nf_clone,
                 ),

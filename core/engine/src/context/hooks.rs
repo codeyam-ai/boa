@@ -197,6 +197,28 @@ pub trait HostHooks {
         now.unix_timestamp() * 1000 + i64::from(now.millisecond())
     }
 
+    /// Returns the host's time zone identifier, the value of the spec's
+    /// [`SystemTimeZoneIdentifier ( )`][spec]: an IANA name such as
+    /// `"America/New_York"` or an offset string such as `"+05:30"`.
+    ///
+    /// `Intl.DateTimeFormat` uses it when no `timeZone` option is given, and
+    /// `Temporal.Now.timeZoneId()` returns it, so a host that overrides
+    /// [`HostHooks::local_timezone_offset_seconds`] should override this to
+    /// name the same zone. `None` means UTC, unless the `system-time-zone`
+    /// feature is enabled, in which case the operating system's zone is used.
+    ///
+    /// [spec]: https://tc39.es/ecma262/#sec-systemtimezoneidentifier
+    fn system_time_zone_identifier(&self) -> Option<String> {
+        #[cfg(feature = "system-time-zone")]
+        {
+            iana_time_zone::get_timezone().ok()
+        }
+        #[cfg(not(feature = "system-time-zone"))]
+        {
+            None
+        }
+    }
+
     /// Returns the offset of the local timezone to the `utc` timezone in seconds.
     fn local_timezone_offset_seconds(&self, unix_time_seconds: i64) -> i32 {
         OffsetDateTime::from_unix_timestamp(unix_time_seconds)

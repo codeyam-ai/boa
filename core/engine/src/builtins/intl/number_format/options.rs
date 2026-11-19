@@ -244,6 +244,11 @@ pub(crate) struct Currency {
 }
 
 impl Currency {
+    /// The upper-case ISO 4217 code, such as `"USD"`.
+    pub(crate) fn as_str(&self) -> &str {
+        self.inner.as_str()
+    }
+
     pub(crate) fn to_js_string(self) -> JsString {
         let bytes = self.inner.as_bytes();
         js_string!(&[

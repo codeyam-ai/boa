@@ -177,6 +177,8 @@ pub struct StandardConstructors {
     #[cfg(feature = "intl")]
     list_format: StandardConstructor,
     #[cfg(feature = "intl")]
+    display_names: StandardConstructor,
+    #[cfg(feature = "intl")]
     locale: StandardConstructor,
     #[cfg(feature = "intl")]
     segmenter: StandardConstructor,
@@ -272,6 +274,8 @@ impl Default for StandardConstructors {
             collator: StandardConstructor::default(),
             #[cfg(feature = "intl")]
             list_format: StandardConstructor::default(),
+            #[cfg(feature = "intl")]
+            display_names: StandardConstructor::default(),
             #[cfg(feature = "intl")]
             locale: StandardConstructor::default(),
             #[cfg(feature = "intl")]
@@ -894,6 +898,19 @@ impl StandardConstructors {
     #[cfg(feature = "intl")]
     pub const fn list_format(&self) -> &StandardConstructor {
         &self.list_format
+    }
+
+    /// Returns the `Intl.DisplayNames` constructor.
+    ///
+    /// More information:
+    ///  - [ECMAScript reference][spec]
+    ///
+    /// [spec]: https://tc39.es/ecma402/#sec-intl-displaynames-constructor
+    #[inline]
+    #[must_use]
+    #[cfg(feature = "intl")]
+    pub const fn display_names(&self) -> &StandardConstructor {
+        &self.display_names
     }
 
     /// Returns the `Intl.Locale` constructor.
